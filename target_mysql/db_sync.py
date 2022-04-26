@@ -132,6 +132,27 @@ def transform_to_mysqldate(val):
     dt = datetime.strptime(val,'%Y-%m-%dT%H:%M:%S.%fZ')
     return dt.strftime(MYSQL_DTAETIME_FORMAT)
 
+def stream_name_to_dict(stream_name, separator='-'):
+    catalog_name = None
+    schema_name = None
+    table_name = stream_name
+
+    # Schema and table name can be derived from stream if it's in <schema_nama>-<table_name> format
+    s = stream_name.split(separator)
+    if len(s) == 2:
+        schema_name = s[0]
+        table_name = s[1]
+    if len(s) > 2:
+        catalog_name = s[0]
+        schema_name = s[1]
+        table_name = '_'.join(s[2:])
+
+    return {
+        'catalog_name': catalog_name,
+        'schema_name': schema_name,
+        'table_name': table_name
+    }
+
 class DbSync:
 
     def __init__(self, connection_config, stream_schema_message):
@@ -170,11 +191,18 @@ class DbSync:
             with connection.cursor(pymysql.cursors.DictCursor) as cur:
                 cur.copy_from(file, table)
 
-    def table_name(self, table_name, is_temporary):
+    def table_name(self, stream_name, is_temporary=False, without_schema=False):
+        stream_dict = stream_name_to_dict(stream_name)
+        table_name = stream_dict['table_name']
+        table_name = table_name.replace('.', '_').replace('-', '_')
+
         if is_temporary:
             return '{}_temp'.format(table_name)
         else:
-            return '{}.{}'.format(self.schema_name, table_name)
+            if without_schema:
+                return '{}'.format(table_name)
+            else:
+                return '{}.{}'.format(self.schema_name, table_name)
 
     # Need to check its useful or not
     def reject_file(self, file):
@@ -352,7 +380,8 @@ class DbSync:
     def update_columns(self):
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
-        columns = self.get_table_columns(stream)
+        table_name = self.table_name(stream, without_schema=True)
+        columns = self.get_table_columns(table_name)
         columns_dict = {column['column_name'.upper()].lower(): column for column in columns}
 
         columns_to_add = [
@@ -394,11 +423,14 @@ class DbSync:
     def sync_table(self):
         stream_schema_message = self.stream_schema_message
         stream = stream_schema_message['stream']
-        found_tables = [table for table in (self.get_tables()) if table['TABLE_NAME'].lower() == stream.lower()]
+
+        table_name = self.table_name(stream, without_schema=True)
+
+        found_tables = [table for table in (self.get_tables()) if table['TABLE_NAME'].lower() == table_name.lower()]
         if len(found_tables) == 0:
             query = self.create_table_query()
-            logger.info("Table '{}' does not exist. Creating... {}".format(stream, query))
+            logger.info("Table '{}' does not exist. Creating... {}".format(table_name, query))
             self.query(query)
         else:
-            logger.info("Table '{}' exists".format(stream))
+            logger.info("Table '{}' exists".format(table_name))
             self.update_columns()
